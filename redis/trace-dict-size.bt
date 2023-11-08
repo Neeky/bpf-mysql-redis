@@ -1,0 +1,25 @@
+#!/usr/bin/env bpftrace
+
+/**
+ * 初代庄主 | Neeky
+ * 2022-01-01
+ */
+
+#include "dict.h"
+
+BEGIN 
+{
+    print("redis dict 大小追踪 \n")
+}
+
+uprobe:/usr/local/redis/bin/redis-server:dictAddRaw
+{
+    printf("dict.ht_used = %d \n", ((struct dict *)arg0)->ht_used[0]);
+    printf("dict.ht_size_exp[0] = 2 ** %d \n", ((struct dict *)arg0)->ht_size_exp[0]); 
+    printf("dict.ht_size_exp[1] = 2 ** %d \n", ((struct dict *)arg0)->ht_size_exp[1]);
+}
+
+END
+{
+    print("exit \n")
+}
