@@ -8,7 +8,7 @@ author: neeky
 
 BEGIN {
     printf("mysql trace on thead-os-id : %d \n", $1);
-    printf("%-12s    %-21s    %-36s    sql\n", "thread", "timestamp", "fun")
+    printf("%-12s    %-21s    %-48s    sql|duration \n", "thread", "timestamp", "fun")
 }
 
 
@@ -16,68 +16,98 @@ BEGIN {
 // dispatch_command
 uprobe:/usr/local/mysql/bin/mysqld:_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command /tid == $1/{
     if (arg2 == 3) {
+        // 记录下 sql 开始执行的时间
         @times[tid] = nsecs;
+
+        // 记录下 sql 语句 
         @sql[tid] = str(*arg1);
-        @sql[tid] = str(*arg1);
+
         printf("tid: %d    time: %-12s    %-48s    sql: %-63s \n", tid, strftime("%H:%M:%S.%f", @times[tid]), "dispatch_command", str(*arg1));
     }   
 }
 
 // Sql_cmd_insert_values::execute_inner
 uprobe:/usr/local/mysql/bin/mysqld:_ZN21Sql_cmd_insert_values13execute_innerEP3THD /@times[tid]/{
-    @inserts[tid] = nsecs;
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "  Sql_cmd_insert_values::execute_inner", "******");
+    @time_at_execute_inner[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "  Sql_cmd_insert_values::execute_inner", @sql[tid]);
 }
 
 // trans_commit
 uprobe:/usr/local/mysql/bin/mysqld:_Z17trans_commit_stmtP3THDb /@times[tid]/{
-    @commits[tid] = nsecs;
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "  trans_commit", "xxxxxx");
+    @time_at_trans_commit[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "  trans_commit", @sql[tid]);
 }
 
 // prepare
 uprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG7prepareEP3THDb /@times[tid]/{
-    @prepares[tid] = nsecs;
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "    prepare", "");
+    @time_at_binlog_preprare[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "    prepare", @sql[tid]);
 }
 
 // commit
 uprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG6commitEP3THDb /@times[tid]/{
-    @commit2[tid] = nsecs;
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "    commit", "");
+    @time_at_binlog_commit[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "    commit", @sql[tid]);
+}
+
+// ordered_commit
+uprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG14ordered_commitEP3THDbb /@times[tid]/ {
+    @time_at_order_commit[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "      ordered_commit", @sql[tid]);
+}
+
+uprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG12change_stageEP3THDN20Commit_stage_manager7StageIDES1_P13mysql_mutex_tS5_ /@times[tid]/{
+    @time_chage_state[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "        mysql-binlog::change_stage", @sql[tid]);
+}
+
+// 
+uprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG19flush_cache_to_fileEPy /@times[tid]/{
+    @time_flush_cache_to_file[tid] = nsecs;
+    printf("tid: %d    time: %-12s    %-48s    sql: %-63s\n", tid, strftime("%H:%M:%S.%f", nsecs), "        mysql-binlog::flush_cache_to_file", @sql[tid]);
 }
 
 
 
 uretprobe:/usr/local/mysql/bin/mysqld:_Z16dispatch_commandP3THDPK8COM_DATA19enum_server_command /@times[tid]/{
-    $delta = nsecs - @times[tid];
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s    duration: %d(us) \n\n", tid, strftime("%H:%M:%S.%f", nsecs), "dispatch_command", @sql[tid], $delta/1000);
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n\n", tid, strftime("%H:%M:%S.%f", nsecs), "dispatch_command", (nsecs - @times[tid])/1000);
 
     delete(@times[tid]);
     delete(@sql[tid]);
-
 }
-
 
 uretprobe:/usr/local/mysql/bin/mysqld:_ZN21Sql_cmd_insert_values13execute_innerEP3THD /@times[tid]/{
-    $inserts_delta = nsecs - @inserts[tid];
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s    duration: %d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "  Sql_cmd_insert_values::execute_inner", "******", $inserts_delta/1000);
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "  Sql_cmd_insert_values::execute_inner", (nsecs - @time_at_execute_inner[tid])/1000);
+    delete(@time_at_execute_inner[tid]);
 }
-
 
 uretprobe:/usr/local/mysql/bin/mysqld:_Z17trans_commit_stmtP3THDb /@times[tid]/{
-    $commits_delta = nsecs - @commits[tid];
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s    duration: %d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "  trans_commit", "xxxxxx", $commits_delta/1000);
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "  trans_commit", (nsecs - @time_at_trans_commit[tid])/1000);
+    delete(@time_at_trans_commit[tid]);
 }
-
 
 uretprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG7prepareEP3THDb /@times[tid]/{
-    $prepares_delta = nsecs - @prepares[tid];
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s    duration: %d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "    prepare", "", $prepares_delta/1000);
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "    prepare", (nsecs - @time_at_binlog_preprare[tid])/1000);
+    delete(@time_at_binlog_preprare[tid]);
+}
+
+uretprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG6commitEP3THDb /@times[tid]/{
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "    commit", (nsecs - @time_at_binlog_commit[tid])/1000);
+    delete(@time_at_binlog_commit[tid]);
+}
+
+uretprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG14ordered_commitEP3THDbb /@times[tid]/ {
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "      ordered_commit", (nsecs - @time_at_order_commit[tid])/1000);
+    delete(@time_at_order_commit[tid]);
 }
 
 
-uretprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG6commitEP3THDb /@times[tid]/{
-    $commit2_delta = nsecs - @commit2[tid];
-    printf("tid: %d    time: %-12s    %-48s    sql: %-63s    duration: %d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "    commit", "", $commit2_delta/1000);
+uretprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG12change_stageEP3THDN20Commit_stage_manager7StageIDES1_P13mysql_mutex_tS5_ /@times[tid]/{
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "        mysql-binlog::change_stage", (nsecs - @time_chage_state[tid])/1000);
+    delete(@time_chage_state[tid]);
+}
+
+uretprobe:/usr/local/mysql/bin/mysqld:_ZN13MYSQL_BIN_LOG19flush_cache_to_fileEPy /@times[tid]/{
+    printf("tid: %d    time: %-12s    %-48s    duration: %-9d(us) \n", tid, strftime("%H:%M:%S.%f", nsecs),  "        mysql-binlog::flush_cache_to_file", (nsecs - @time_flush_cache_to_file[tid])/1000);
+    delete(@time_flush_cache_to_file[tid]);
 }
